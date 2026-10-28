@@ -1,0 +1,98 @@
+version: 1
+
+channels:
+
+  example.monitoring.${SENSOR}: !template/repeat
+    source table:
+      - SENSOR: sensor_1
+        LOCATION_CODE: location_1
+      - SENSOR: sensor_2
+        LOCATION_CODE: location_2
+    body:
+      trigger:
+        stream id: "example.monitoring.${SENSOR}"
+        trim length: 200
+        trim_mode: "safe"
+      encoding:
+        _default: "JSON"
+        _start: "JSONListWithDatetimeStrings"
+        _stop: "JSONListWithDatetimeStrings"
+        _time: "JSONListWithDatetimeStrings"
+      steps:
+        - type: "UnpackArrayValues"
+          unpack keys: ["result", "table", "_start", "_stop", "_time", "_value", "_field", "_measurement"]
+        - type: "CachedSQLQuery"
+          cache keys: ["_measurement", "data_provider"]
+          single value: True
+          query: "SELECT get_or_create_data_point_id(:_measurement, NULL, '${LOCATION_CODE}', :data_provider) AS dp_id;"
+      data sink:
+        table: "raw_unitemporal_double"
+        update duplicate values: True
+        columns:
+          dp_id: "dp_id"
+          valid_time: "_time"
+          value: "_value"
+
+  example.regularize.${SENSOR}: !template/repeat
+    source table:
+      - SENSOR: sensor_1
+        LOCATION_CODE: location_1
+      - SENSOR: sensor_2
+        LOCATION_CODE: location_2
+    body:
+      trigger:
+        stream id: "example.regularize.${SENSOR}"
+        trim length: 200
+        trim_mode: "safe"
+      encoding:
+        _default: "JSON"
+        valid_time: "JSONListWithDatetimeStrings"
+      steps:
+        - type: "UnpackArrayValues"
+          unpack keys: ["valid_time", "value"]
+        - type: "CachedSQLQuery"
+          cache keys: ["name", "location_code", "data_provider"]
+          single value: True
+          query: "SELECT get_or_create_data_point_id(:name, NULL, :location_code, :data_provider) AS dp_id;"
+      data sink:
+        table: "raw_unitemporal_double"
+        update duplicate values: True
+
+  example.regularize.quality.${SENSOR}: !template/repeat
+    source table:
+      - SENSOR: sensor_1
+        LOCATION_CODE: location_1
+      - SENSOR: sensor_2
+        LOCATION_CODE: location_2
+    body:
+      trigger:
+        stream id: "example.regularize.${SENSOR}"
+        trim length: 200
+        trim_mode: "safe"
+      encoding:
+        _default: "JSON"
+        valid_time: "JSONListWithDatetimeStrings"
+      steps:
+        - type: "UnpackArrayValues"
+          unpack keys: ["valid_time", "quality"]
+        - type: "CachedSQLQuery"
+          cache keys: ["name", "location_code", "data_provider"]
+          single value: True
+          query: "SELECT get_or_create_data_point_id(CONCAT(:name, '_quality'), NULL, :location_code, :data_provider, NULL, '{}'::jsonb, 'jsonb', 'unitemporal') AS dp_id;"
+        - type: "PackMessageValues"
+          destination:
+            quality_json:
+              quality: "%quality"
+      data sink:
+        table: "raw_unitemporal_jsonb"
+        update duplicate values: True
+        columns:
+          value: "quality_json"
+
+## The connection to the destination database
+database connection: !env-template "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@timescale/rdp_db"
+redis:
+  host: redis
+  port: 6379
+  db: 0
+  password: ${REDIS_PASSWORD}

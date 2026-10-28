@@ -1,0 +1,56 @@
+version: 1
+
+channels:
+
+  example.regularize.${SENSOR}: !template/repeat
+    source table:
+      - SENSOR: sensor_1
+        LOCATION_CODE: location_1
+      - SENSOR: sensor_2
+        LOCATION_CODE: location_2
+    body:
+      window: ${HISTORY_MINUTES}m # internal history length used for history-based imputation and forecasting
+      output_stream: example.regularize.${SENSOR}
+      input_stream: example.monitoring.${SENSOR} # Adjust to data crawler stream
+      update_interval: ${INTERVAL_SECONDS}s # Adjust to data source update interval
+      polling_interval: ${POLLING_INTERVAL_SECONDS}s # Adjust to data crawler polling interval
+      lag_time: ${REGULARIZER_LAG_TIME_SECONDS}s # Adjust to data crawler polling lag time
+      data_provider_name: Example-Regularize
+      jitter_tolerance: ${JITTER_MILLISECONDS}ms
+      # output_maxlen: 200
+      imputer:
+        name: knn
+        period: ${PERIOD_SECONDS}s
+      forecaster:
+        name: knn
+        period: ${PERIOD_SECONDS}s
+      history_provider: # Adjust to timescale database
+        dp_name: ${SENSOR}
+        dp_location_code: ${LOCATION_CODE}
+        dp_data_provider: Example-InfluxDB
+        dp_device_id: null
+        init_when_source_available: ${INIT_WHEN_SOURCE_AVAILABLE}
+        bootstrap_delay: ${BOOTSTRAP_DELAY_SECONDS}s
+
+redis:
+  host: "redis"
+  port: 6379
+  db: 0
+  password: ${REDIS_PASSWORD}
+
+timescale:
+  host: "timescale"
+  port: 5432
+  db: rdp_db
+  user: ${POSTGRES_USER}
+  password: ${POSTGRES_PASSWORD}
+
+logging:
+  loggers:
+    rdp-regularizer:
+      level: "INFO"
+      handlers: ["console"]
+    peewee:
+      level: "INFO"
+    asyncio:
+      level: "INFO"

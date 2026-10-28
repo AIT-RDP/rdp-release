@@ -1,0 +1,37 @@
+version: 1
+
+data sources:
+  example.monitoring.${SENSOR}: !template/repeat
+    source table:
+      - SENSOR: sensor_1
+      - SENSOR: sensor_2
+    body:
+      type: data_crawler.sources.influxdb.InfluxDBSource
+      source parameter:
+        url: ${DATABASE_URL}
+        token: ${DATABASE_TOKEN}
+        org: ${DATABASE_ORG}
+        query: |
+          from(bucket: "${DATABASE_BUCKET}")
+            |> range(start: _start_time, stop: _stop_time)
+            |> filter(fn: (r) => r._measurement == "${SENSOR}")
+        initial_history: ${HISTORY_MINUTES}m
+        lag_time: ${CRAWLER_LAG_TIME_SECONDS}s
+      polling:
+        frequency: ${POLLING_INTERVAL_SECONDS}s
+      redis:
+        stream: example.monitoring.${SENSOR}
+        tags:
+          data_provider: Example-InfluxDB
+
+redis:
+  host: redis
+  port: 6379
+  db: 0
+  password: !env-template ${REDIS_PASSWORD}
+
+logging:
+  loggers:
+    urllib3.connectionpool:
+      level: INFO
+      handlers: ["console"]

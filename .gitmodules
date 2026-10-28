@@ -1,0 +1,12 @@
+[submodule "src/rdp-data-crawler"]
+	path = src/rdp-data-crawler
+	url = https://github.com/AIT-RDP/rdp-data-crawler.git
+[submodule "src/rdp-regularizer"]
+	path = src/rdp-regularizer
+	url = https://github.com/AIT-RDP/rdp-regularizer.git
+[submodule "src/rdp-redsql"]
+	path = src/rdp-redsql
+	url = https://github.com/AIT-RDP/rdp-redsql.git
+[submodule "src/rdp-database"]
+	path = src/rdp-database
+	url = https://github.com/AIT-RDP/rdp-database.git

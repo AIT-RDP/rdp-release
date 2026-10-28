@@ -1,0 +1,215 @@
+name: rdp-example
+
+services:
+  dummy-source:
+    image: influxdb:2.7
+    # Wrap the official entrypoint: start the generator in the background, then run influxd
+    entrypoint: ["/bin/bash", "/scripts/start.sh"]
+    command: ["influxd"]
+    ## Expose ports only for development / debugging.
+    # ports:
+    #   - "8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${DATABASE_USERNAME}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${DATABASE_PASSWORD}
+      DOCKER_INFLUXDB_INIT_ORG: ${DATABASE_ORG}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${DATABASE_BUCKET}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${DATABASE_TOKEN}
+      INTERVAL_SECONDS: ${INTERVAL_SECONDS}
+      JITTER_MILLISECONDS: ${JITTER_MILLISECONDS}
+      HISTORY_MINUTES: ${HISTORY_MINUTES}
+      PERIOD_SECONDS: ${PERIOD_SECONDS}
+      DROP_PROBABILITY: ${DROP_PROBABILITY}
+    volumes:
+      - dummy-source-data:/var/lib/influxdb2
+      - ./dummy-source:/scripts:ro
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    networks:
+      - rdp-example-net
+
+  redis:
+    image: "redis:7-alpine"
+    depends_on:
+      - dummy-source
+    command: >
+      --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    networks:
+      - rdp-example-net
+    ## Expose ports only for development / debugging.
+    # ports:
+    #  - "6379:6379"
+
+  ## ----------------------------------------------------------------------------------------
+  ## This micro-service retrieves data from the dummy source and puts it on the Redis stream.
+  ## ----------------------------------------------------------------------------------------
+  data-crawler:
+    image: ait1/rdp-data-crawler:latest-dev
+    depends_on:
+      - redis
+    volumes:
+      - ./data-crawler/config.yml:/etc/data_crawler/config.yml:ro
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      DATABASE_URL: ${DATABASE_URL}
+      DATABASE_TOKEN: ${DATABASE_TOKEN}
+      DATABASE_ORG: ${DATABASE_ORG}
+      DATABASE_BUCKET: ${DATABASE_BUCKET}
+      HISTORY_MINUTES: ${HISTORY_MINUTES}
+      CRAWLER_LAG_TIME_SECONDS: ${CRAWLER_LAG_TIME_SECONDS}
+      POLLING_INTERVAL_SECONDS: ${POLLING_INTERVAL_SECONDS}
+    restart: unless-stopped
+    networks:
+      - rdp-example-net
+
+  ## ----------------------------------------------------------
+  ## Use TimescaleDB for permanent storage of time series data.
+  ## ----------------------------------------------------------
+  timescale:
+    image: "timescale/timescaledb:latest-pg17"
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      TIMESCALEDB_TELEMETRY: "off"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - rdp-example-net
+    ## Expose ports only for development / debugging.
+    # ports:
+    #  - "5432:5432"
+
+  ## ------------------------------------------------------------------------
+  ## This micro-service defines the database schema used by the timescale DB.
+  ## ------------------------------------------------------------------------
+  db-scheme:
+    image: ait1/rdp-database:latest-dev
+    depends_on:
+      timescale:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD}
+      POSTGRES_DATA_SOURCE_USER: ${POSTGRES_DATA_SOURCE_USER}
+      POSTGRES_DATA_SOURCE_PASSWORD: ${POSTGRES_DATA_SOURCE_PASSWORD}
+      POSTGRES_DATA_VIS_USER: ${POSTGRES_DATA_VIS_USER}
+      POSTGRES_DATA_VIS_PASSWORD: ${POSTGRES_DATA_VIS_PASSWORD}
+      POSTGRES_DATA_PUB_VIS_USER: ${POSTGRES_DATA_PUB_VIS_USER}
+      POSTGRES_DATA_PUB_VIS_PASSWORD: ${POSTGRES_DATA_PUB_VIS_PASSWORD}
+      RDP_POSTGRES_HOST: timescale
+    networks:
+      - rdp-example-net
+
+  ## ----------------------------------------------------------------------------------
+  ## This micro-service stores selected data from the Redis stream to the TimescaleDB.
+  ## ----------------------------------------------------------------------------------
+  redsql:
+    image: ait1/rdp-redsql:latest-dev
+    depends_on:
+      redis:
+        condition: service_started
+      db-scheme:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_USER: ${POSTGRES_DATA_SOURCE_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_DATA_SOURCE_PASSWORD}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    volumes:
+      - ./redsql/config.yml:/etc/redsql/config.yml:ro
+    restart: unless-stopped
+    networks:
+      - rdp-example-net
+
+  ## --------------------------------------------------------------------
+  ## This micro-service regularizes monitoring streams (incl. impute/forecast).
+  ## --------------------------------------------------------------------
+  regularizer:
+    image: ait1/rdp-regularizer:latest-dev
+    depends_on:
+      redsql:
+        condition: service_started
+      data-crawler:
+        condition: service_started
+    volumes:
+      - ./regularizer/config.yml:/etc/regularizer/config.yml:ro
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      POSTGRES_USER: ${POSTGRES_DATA_SOURCE_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_DATA_SOURCE_PASSWORD}
+      HISTORY_MINUTES: ${HISTORY_MINUTES}
+      PERIOD_SECONDS: ${PERIOD_SECONDS}
+      INTERVAL_SECONDS: ${INTERVAL_SECONDS}
+      POLLING_INTERVAL_SECONDS: ${POLLING_INTERVAL_SECONDS}
+      REGULARIZER_LAG_TIME_SECONDS: ${REGULARIZER_LAG_TIME_SECONDS}
+      JITTER_MILLISECONDS: ${JITTER_MILLISECONDS}
+      INIT_WHEN_SOURCE_AVAILABLE: ${INIT_WHEN_SOURCE_AVAILABLE:-true}
+      BOOTSTRAP_DELAY_SECONDS: ${BOOTSTRAP_DELAY_SECONDS:-5}
+    restart: unless-stopped
+    networks:
+      - rdp-example-net
+
+  ## ---------------------------------------------------------------------------------
+  ## Use grafana for visualization of data in the timescale DB.
+  ## ---------------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana-oss:12.1.0
+    depends_on:
+      db-scheme:
+        condition: service_completed_successfully
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      POSTGRES_DATA_VIS_USER: ${POSTGRES_DATA_VIS_USER}
+      POSTGRES_DATA_VIS_PASSWORD: ${POSTGRES_DATA_VIS_PASSWORD}
+      GF_LOG_FILTERS: migrator:warn
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    networks:
+      - rdp-example-net
+
+  ## ---------------------------------------------------------------------------------
+  ## For debugging: use Redis Insight browser to explore the content of redis streams.
+  # ## ---------------------------------------------------------------------------------
+  # redis-insight:
+  #   image: redis/redisinsight
+  #   restart: unless-stopped
+  #   environment:
+  #     - RI_REDIS_HOST0=redis
+  #     - RI_REDIS_PORT0=6379
+  #     - RI_REDIS_PASSWORD0=${REDIS_PASSWORD}
+  #     - RI_REDIS_ALIAS0=Example Dashboard Data Streams
+  #   ports:
+  #     - 5540:5540
+  #   depends_on:
+  #     - redis
+  #   networks:
+  #     - rdp-example-net
+
+volumes:
+  dummy-source-data:
+  redis-data:
+  timescale-data:
+  grafana-data:
+  display-data:
+
+networks:
+  rdp-example-net:
